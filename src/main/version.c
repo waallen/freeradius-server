@@ -301,6 +301,8 @@ int version_add_number(CONF_SECTION *cs, char const *name, char const *version)
  */
 void version_init_features(CONF_SECTION *cs)
 {
+	version_add_feature(cs, "state_tree", true);
+
 	version_add_feature(cs, "accounting",
 #ifdef WITH_ACCOUNTING
 				true
