@@ -2523,6 +2523,22 @@ bool rad_packet_ok(RADIUS_PACKET *packet, int flags, decode_fail_t *reason)
 			}
 			seen_ma = true;
 			break;
+
+			/*
+			 *	Cache a copy of the State attribute,
+			 *	possibly truncated... so that we can
+			 *	clean up old packets quickly.
+			 */
+		case PW_STATE:
+			if (packet->state_len || (attr[1] == 2)) break;
+
+			packet->state_len = attr[1] - 2;
+			if (packet->state_len > sizeof(packet->state)) packet->state_len = sizeof(packet->state);
+
+			/*
+			 *	The rest of "state" has been set to zero by rad_alloc()
+			 */
+			memcpy(packet->state, attr + 2, packet->state_len);
 		}
 
 		/*

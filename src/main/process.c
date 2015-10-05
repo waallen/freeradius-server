@@ -51,6 +51,7 @@ static bool spawn_flag = false;
 static bool just_started = true;
 time_t fr_start_time = (time_t)-1;
 static rbtree_t *pl = NULL;
+static rbtree_t *state_tree = NULL;
 static fr_event_list_t *el = NULL;
 
 fr_event_list_t *radius_event_list_corral(UNUSED event_corral_t hint) {
@@ -547,6 +548,14 @@ static void request_free(REQUEST *request)
 	rad_assert(request->ev == NULL);
 	rad_assert(!request->in_request_hash);
 	rad_assert(!request->in_proxy_hash);
+
+	/*
+	 *	Delete old packets from the state tree.
+	 */
+	if (request->packet && (request->packet->code == PW_CODE_ACCESS_REQUEST) &&
+	    request->reply && rbtree_deletebydata(state_tree, &request->reply)) {
+		RDEBUG3("STATE_TREE remove reply %u %u", request->reply->code, request->number);
+	}
 
 	if ((request->options & RAD_REQUEST_OPTION_CTX) == 0) {
 		talloc_free(request);
@@ -1209,7 +1218,7 @@ static int request_pre_handler(REQUEST *request, UNUSED int action)
 
 	VERIFY_REQUEST(request);
 
-	TRACE_STATE_MACHINE;
+//	TRACE_STATE_MACHINE;
 
 	if (request->master_state == REQUEST_STOP_PROCESSING) return 0;
 
@@ -1459,6 +1468,28 @@ static void request_finish(REQUEST *request, int action)
 			}
 
 			debug_packet(request, request->reply, false);
+
+			/*
+			 *	Track packets by State attribute.  If
+			 *	there's a State attribute in the
+			 *	reply, delete any tracking by source
+			 *	packet, and replace it with tracking
+			 *	by reply.
+			 */
+			if (request->packet->code == PW_CODE_ACCESS_REQUEST) {
+				vp = fr_pair_find_by_num(request->reply->vps, PW_STATE, 0, TAG_ANY);
+				if (vp && (vp->vp_length > 0)) {
+					request->reply->state_len = vp->vp_length;
+					if (request->reply->state_len > sizeof(request->reply->state)) {
+						request->reply->state_len = sizeof(request->reply->state);
+					}
+					memcpy(request->reply->state, vp->vp_octets, request->reply->state_len);
+
+					RDEBUG3("STATE_TREE add reply %u", request->number);
+					(void) rbtree_insert(state_tree, &request->reply);
+				}
+			}
+
 			request->listener->send(request->listener, request);
 		}
 
@@ -1746,6 +1777,27 @@ skip_dup:
 		}
 
 		request->in_request_hash = true;
+	}
+
+	/*
+	 *	If we're tracking by State, delete any old packets by State.
+	 */
+	if (request->packet->code == PW_CODE_ACCESS_REQUEST) {
+		REQUEST *old;
+		RADIUS_PACKET **old_packet;
+
+		RDEBUG3("STATE_TREE lookup %u", request->number);
+		old_packet = rbtree_finddata(state_tree, &request->packet);
+		if (old_packet) {
+			rad_assert((*old_packet)->code != PW_CODE_ACCESS_REQUEST);
+
+			old = fr_packet2myptr(REQUEST, reply, old_packet);
+
+			if (old->child_state > REQUEST_PROXIED) {
+				RDEBUG3("STATE_TREE remove old %u", old->number);
+				request_done(old, REQUEST_DONE);
+			}
+		}
 	}
 
 	/*
@@ -5329,6 +5381,29 @@ static void check_proxy(rad_listen_t *head)
 }
 #endif
 
+/*
+ *	Track packets with State
+ */
+static int packet_state_cmp(void const *one, void const *two)
+{
+	RADIUS_PACKET const *a = *(RADIUS_PACKET const **) one;
+	RADIUS_PACKET const *b = *(RADIUS_PACKET const **) two;
+
+	VERIFY_PACKET(a);
+	VERIFY_PACKET(b);
+
+	if (a->state_len < b->state_len) return -1;
+	if (a->state_len > b->state_len) return +1;
+
+	/*
+	 *	This should never happen.
+	 */
+	if (!a->state_len) return -1;
+	if (!b->state_len) return +1;
+
+	return memcmp(a->state, b->state, a->state_len);
+}
+
 int radius_event_start(CONF_SECTION *cs, bool have_children)
 {
 	rad_listen_t *head = NULL;
@@ -5345,6 +5420,9 @@ int radius_event_start(CONF_SECTION *cs, bool have_children)
 
 		pl = rbtree_create(NULL, packet_entry_cmp, NULL, 0);
 		if (!pl) return 0;	/* leak el */
+
+		state_tree = rbtree_create(NULL, packet_state_cmp, NULL, RBTREE_FLAG_LOCK);
+		if (!state_tree) return 0;	/* leak el */
 	}
 
 	request_num_counter = 0;

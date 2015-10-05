@@ -393,6 +393,8 @@ typedef struct radius_packet {
 	int			id;
 	unsigned int		code;
 	uint8_t			vector[AUTH_VECTOR_LEN];
+	uint8_t			state[32];
+	size_t			state_len;
 	struct timeval		timestamp;
 	uint8_t			*data;
 	size_t			data_len;
